@@ -18,6 +18,7 @@ use crate::hal::{
     stm32,
 };
 
+use core::ptr;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
 use cortex_m_semihosting::*;
@@ -62,7 +63,6 @@ fn main() -> ! {
     adc.cr1.modify(|_, w| w.eocie().bit(true));
     adc.cr2.modify(|_, w| w.eocs().bit(false));
     //start conversion
-    adc.cr2.modify(|_, w| w.swstart().set_bit());
     //adc prescaler /8
     device
         .ADC_COMMON
@@ -91,7 +91,7 @@ fn main() -> ! {
     //wait the dma to be really disabled
     while dma_2.st[0].cr.read().en().bit_is_set() {}
 
-    //reset stream 0 status 
+    //reset stream 0 status
     dma_2.lifcr.write(|w| {
         w.ctcif0()
             .clear()
@@ -184,15 +184,24 @@ fn main() -> ! {
     unsafe { NVIC::unmask(stm32f4::stm32f411::Interrupt::DMA2_STREAM0) };
     // Move the adc into our global storage
     //cortex_m::interrupt::free(|cs| *G_ADC.borrow(cs).borrow_mut() = Some(adc));
+    adc.cr2.modify(|_, w| w.swstart().set_bit());
     rprintln!("Init Done");
     let last_dma_request = false;
-    loop {}
+    loop {
+        core::sync::atomic::spin_loop_hint();
+    }
 }
 
 #[interrupt]
 fn DMA2_STREAM0() {
     //hprintln!("DMA2_STREAM0").unwrap();
-    rprintln!("DMA2_STREAM0");
+     unsafe {
+        let w_pos = ptr::read_volatile(pac::DMA2::ptr()).st[0].ndtr.read().bits();
+        rprintln!("DMA2_STREAM0 {}", w_pos);
+        if w_pos == 8 {
+            rprintln!("{:?}", &G_DMA_BUFFER[0..8]);
+        }
+    }
 }
 
 #[interrupt]
