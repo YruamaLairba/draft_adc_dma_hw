@@ -2,7 +2,7 @@
 #![no_main]
 
 // pick a panicking behavior
-use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
+//use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
 
 // use panic_abort as _; // requires nightly
 // use panic_itm as _; // logs messages over ITM; requires ITM support
@@ -18,7 +18,9 @@ use crate::hal::{
     stm32,
 };
 
+use core::cell::{Cell, RefCell};
 use core::ptr;
+use cortex_m::interrupt::Mutex;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
 use cortex_m_semihosting::*;
@@ -27,6 +29,7 @@ use stm32f4::stm32f411::{interrupt, NVIC};
 use stm32f4xx_hal as hal;
 
 static mut G_DMA_BUFFER: [u16; 16] = [0; 16];
+static G_DATA: Mutex<RefCell<Option<&[u16]>>> = Mutex::new(RefCell::new(None));
 
 #[entry]
 fn main() -> ! {
@@ -60,7 +63,7 @@ fn main() -> ! {
     unsafe {
         adc.sqr3.modify(|_, w| w.sq1().bits(0b0000_0000));
     }
-    adc.cr1.modify(|_, w| w.eocie().bit(true));
+    adc.cr1.modify(|_, w| w.eocie().bit(false));
     adc.cr2.modify(|_, w| w.eocs().bit(false));
     //start conversion
     //adc prescaler /8
@@ -69,7 +72,7 @@ fn main() -> ! {
         .ccr
         .modify(|_, w| w.adcpre().bits(0b0000_0011));
 
-    //unsafe { NVIC::unmask(stm32f4::stm32f411::Interrupt::ADC) };
+    unsafe { NVIC::unmask(stm32f4::stm32f411::Interrupt::ADC) };
     let first_buffer = singleton!(: [u16; 128] = [0; 128]).unwrap();
     let second_buffer = singleton!(: [u16; 128] = [0; 128]).unwrap();
     let triple_buffer = Some(singleton!(: [u16; 128] = [0; 128]).unwrap());
@@ -185,9 +188,16 @@ fn main() -> ! {
     // Move the adc into our global storage
     //cortex_m::interrupt::free(|cs| *G_ADC.borrow(cs).borrow_mut() = Some(adc));
     adc.cr2.modify(|_, w| w.swstart().set_bit());
+
     rprintln!("Init Done");
     let last_dma_request = false;
     loop {
+        let data:Option<()> = None;
+        //let data = cortex_m::interrupt::free(|cs| G_DATA.borrow(cs).replace(None));
+        rprintln!("{:?}", data);
+        if let Some(data) = data {
+            rprintln!("{:?}", data);
+        }
         core::sync::atomic::spin_loop_hint();
     }
 }
@@ -195,19 +205,49 @@ fn main() -> ! {
 #[interrupt]
 fn DMA2_STREAM0() {
     //hprintln!("DMA2_STREAM0").unwrap();
-     unsafe {
-        let w_pos = ptr::read_volatile(pac::DMA2::ptr()).st[0].ndtr.read().bits();
-        rprintln!("DMA2_STREAM0 {}", w_pos);
-        if w_pos == 8 {
-            rprintln!("{:?}", &G_DMA_BUFFER[0..8]);
+    return;
+
+    let remain = unsafe {
+        ptr::read_volatile(pac::DMA2::ptr()).st[0]
+            .ndtr
+            .read()
+            .bits()
+    };
+    if remain == 16 {rprintln!("DMA2_STREAM0 {}", remain);}
+    cortex_m::interrupt::free(|cs| match remain {
+        8 => {
+            G_DATA
+                .borrow(cs)
+                .replace(Some(unsafe { &G_DMA_BUFFER[0..8] }));
         }
-    }
+        16 => {
+            G_DATA
+                .borrow(cs)
+                .replace(Some(unsafe { &G_DMA_BUFFER[8..16] }));
+        }
+        _ => (),
+    });
 }
 
 #[interrupt]
 fn ADC() {
-    //hprintln!("ADC").unwrap();
     unsafe {
-        rprintln!("ADC {:?}", G_DMA_BUFFER);
+        if ptr::read_volatile(pac::ADC1::ptr())
+            .sr
+            .read()
+            .ovr()
+            .bit_is_set()
+        {
+            rprintln!("ADC overrun");
+        }
     }
+}
+
+use core::panic::PanicInfo;
+
+#[inline(never)]
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    rprintln!("{}", info);
+    loop {} // You might need a compiler fence in here.
 }
